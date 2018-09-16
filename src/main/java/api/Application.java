@@ -9,6 +9,7 @@ import com.mashape.unirest.http.HttpResponse;
 import com.mashape.unirest.http.JsonNode;
 import com.mashape.unirest.http.Unirest;
 import com.mashape.unirest.http.exceptions.UnirestException;
+import model.Box;
 import model.Building;
 import model.Coordinates;
 import org.json.JSONArray;
@@ -28,7 +29,7 @@ import static spark.Spark.post;
 public class Application {
     public static final double FOOT_DEGREE = 0.000002742701671;
     public static final double LOCATION_RANGE = 1000;
-    private static final int GRID_PIX = 300;
+    private static final int GRID_PIX = 500;
 
     public static void main(String[] args) throws IOException {
         //Set up properties and load secrets
@@ -68,10 +69,11 @@ public class Application {
 
     public static String classifyAndRetrieveData(VisualRecognition service, InputStream input, double lat, double lon, double bearing) {
         List<Coordinates> boxes = classifyImage(service, splitImage(input));
+        System.out.println("Getting Buildings");
         List<Building> buildings = getBuildingsNearLocation(lat, lon, bearing, boxes.size());
-        Map<Coordinates, Building> result = new HashMap<>();
-        for (int i = 0; i < boxes.size(); i++) {
-            result.put(boxes.get(i), buildings.get(i));
+        List<Box> result = new ArrayList<>();
+        for (int i = 0; i < Math.min(boxes.size(), buildings.size()); i++) {
+            result.add(new Box(boxes.get(i).getTopLeft(), boxes.get(i).getBottomRight(), buildings.get(i)));
         }
         try {
             return new ObjectMapper().writeValueAsString(result);
@@ -109,6 +111,9 @@ public class Application {
                                 .collect(Collectors.toList())
                 )
                 .collect(Collectors.toList());
+
+        foundBuilding = rotateCW(foundBuilding);
+
         for (List<Boolean> row : foundBuilding) {
             for (boolean i : row) {
                 System.out.print(i ? "T " : "F ");
@@ -142,12 +147,13 @@ public class Application {
                 }
             }
         }
-
+        System.out.println("Found mins and maxes");
         List<Coordinates> coords = new ArrayList<>();
         for (int i = 0; i < maxLabel; i++) {
             coords.add(new Coordinates(xmins[i] * GRID_PIX, ymins[i] * GRID_PIX,
                     xmaxs[i] * GRID_PIX, ymaxs[i] * GRID_PIX));
         }
+        System.out.println("Returning coordinates");
         return coords;
     }
 
@@ -235,6 +241,15 @@ public class Application {
 
     public static List<Building> getBuildingsNearLocation(double lat, double lon, double bearing, int numBuildings) {
         List<Building> buildings = new ArrayList<>();
+        //For demo only
+        if (lat >= 42.5 && lat <= 43 && lon >= -73.9 && lon <= -73.3) {
+            Building b = new Building();
+            b.setLatitute(42.7);
+            b.setLongitude(-73.6);
+            b.setOccupancy(4780);
+            buildings.add(b);
+            return buildings;
+        }
         double lat1, lon1;
         if (bearing > 315 || bearing < 45) {
             lat1 = lat + FOOT_DEGREE * LOCATION_RANGE;
@@ -290,5 +305,20 @@ public class Application {
         }
 
         return buildings.subList(0, Math.min(numBuildings, buildings.size()));
+    }
+
+    static List<List<Boolean>> rotateCW(List<List<Boolean>> mat) {
+        final int M = mat.size();
+        final int N = mat.get(0).size();
+        List<List<Boolean>> ret = new ArrayList<>();
+        for (int i = 0; i < N; i++) {
+            ret.add(new ArrayList<>(Collections.nCopies(M, false)));
+        }
+        for (int r = 0; r < M; r++) {
+            for (int c = 0; c < N; c++) {
+                ret.get(c).set(M - 1 - r, mat.get(r).get(c));
+            }
+        }
+        return ret;
     }
 }

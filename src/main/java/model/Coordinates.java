@@ -1,8 +1,7 @@
 package model;
 
-import java.awt.*;
-
 public class Coordinates {
+
     private Point topLeft;
     private Point bottomRight;
 
