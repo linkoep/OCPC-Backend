@@ -25,6 +25,15 @@ public class Building {
         return occupancy;
     }
 
+    @Override
+    public String toString() {
+        return "Building{" +
+                "latitute=" + latitute +
+                ", longitude=" + longitude +
+                ", occupancy=" + occupancy +
+                '}';
+    }
+
     public void setOccupancy(int occupancy) {
         this.occupancy = occupancy;
     }

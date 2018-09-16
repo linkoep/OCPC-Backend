@@ -31,4 +31,11 @@ public class Coordinates {
         this.bottomRight = bottomRight;
     }
 
+    @Override
+    public String toString() {
+        return "Coordinates{" +
+                "topLeft=" + topLeft +
+                ", bottomRight=" + bottomRight +
+                '}';
+    }
 }

@@ -1,12 +1,7 @@
 package api;
 
-import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.ibm.watson.developer_cloud.service.security.IamOptions;
 import com.ibm.watson.developer_cloud.visual_recognition.v3.VisualRecognition;
 import com.ibm.watson.developer_cloud.visual_recognition.v3.model.*;
@@ -20,7 +15,6 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import javax.imageio.ImageIO;
-import javax.imageio.stream.ImageInputStream;
 import javax.servlet.MultipartConfigElement;
 import java.awt.*;
 import java.awt.image.BufferedImage;
@@ -34,6 +28,7 @@ import static spark.Spark.post;
 public class Application {
     public static final double FOOT_DEGREE = 0.000002742701671;
     public static final double LOCATION_RANGE = 1000;
+    private static final int GRID_PIX = 300;
 
     public static void main(String[] args) throws IOException {
         //Set up properties and load secrets
@@ -75,7 +70,7 @@ public class Application {
         List<Coordinates> boxes = classifyImage(service, splitImage(input));
         List<Building> buildings = getBuildingsNearLocation(lat, lon, bearing, boxes.size());
         Map<Coordinates, Building> result = new HashMap<>();
-        for(int i = 0; i < boxes.size(); i++) {
+        for (int i = 0; i < boxes.size(); i++) {
             result.put(boxes.get(i), buildings.get(i));
         }
         try {
@@ -90,14 +85,14 @@ public class Application {
         List<List<InputStream>> chopped = new ArrayList<>();
         try {
             source = ImageIO.read(input);
-            for (int y = 0; y < source.getHeight(); y += 32) {
+            for (int y = 0; y < source.getHeight() - GRID_PIX; y += GRID_PIX) {
                 chopped.add(new ArrayList<>());
-                for (int x = 0; x < source.getWidth(); x += 32) {
-                    BufferedImage subImage = source.getSubimage(x, y, 32, 32);
+                for (int x = 0; x < source.getWidth() - GRID_PIX; x += GRID_PIX) {
+                    BufferedImage subImage = source.getSubimage(x, y, GRID_PIX, GRID_PIX);
                     ByteArrayOutputStream os = new ByteArrayOutputStream();
                     ImageIO.write(subImage, "jpg", os);
                     InputStream is = new ByteArrayInputStream(os.toByteArray());
-                    chopped.get(y).add(is);
+                    chopped.get(y / GRID_PIX).add(is);
                 }
             }
         } catch (IOException e) {
@@ -107,14 +102,69 @@ public class Application {
     }
 
     public static List<Coordinates> classifyImage(VisualRecognition service, List<List<InputStream>> chopped) {
-        List<List<Boolean>> foundBuilding = chopped.parallelStream()
+        List<List<Boolean>> foundBuilding = chopped.stream()
                 .map(row ->
-                        row.parallelStream()
+                        row.stream()
                                 .map(image -> containsBuilding(service, image))
                                 .collect(Collectors.toList())
                 )
                 .collect(Collectors.toList());
+        for (List<Boolean> row : foundBuilding) {
+            for (boolean i : row) {
+                System.out.print(i ? "T " : "F ");
+            }
+            System.out.println();
+        }
 
+        List<List<Integer>> colored = extractBlobs(foundBuilding);
+        int maxLabel = 0;
+        for (List<Integer> row : colored) {
+            for (int i : row) {
+                System.out.print(i + " ");
+                maxLabel = Math.max(i, maxLabel);
+            }
+            System.out.println();
+        }
+        int[] xmins = new int[maxLabel];
+        int[] ymins = new int[maxLabel];
+        Arrays.fill(xmins, colored.get(0).size());
+        Arrays.fill(ymins, colored.size());
+        int[] xmaxs = new int[maxLabel];
+        int[] ymaxs = new int[maxLabel];
+        for (int y = 0; y < colored.size(); y++) {
+            for (int x = 0; x < colored.get(y).size(); x++) {
+                int lbl = colored.get(y).get(x) - 1;
+                if (lbl >= 0) {
+                    xmins[lbl] = Math.min(xmins[lbl], x);
+                    ymins[lbl] = Math.min(ymins[lbl], y);
+                    xmaxs[lbl] = Math.max(xmaxs[lbl], x);
+                    ymaxs[lbl] = Math.max(ymaxs[lbl], y);
+                }
+            }
+        }
+
+        List<Coordinates> coords = new ArrayList<>();
+        for (int i = 0; i < maxLabel; i++) {
+            coords.add(new Coordinates(xmins[i] * GRID_PIX, ymins[i] * GRID_PIX,
+                    xmaxs[i] * GRID_PIX, ymaxs[i] * GRID_PIX));
+        }
+        return coords;
+    }
+
+    public static boolean containsBuilding(VisualRecognition service, InputStream image) {
+        List<ClassifierResult> classifiers = classifyImage(service, image).getClassifiers();
+        if (!classifiers.isEmpty()) {
+            List<ClassResult> classes = classifiers.get(0).getClasses();
+            for (ClassResult result : classes) {
+                if (result.getClassName().equalsIgnoreCase("building")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    public static List<List<Integer>> extractBlobs(List<List<Boolean>> foundBuilding) {
         //Initialize to 0s
         List<List<Integer>> colored = new ArrayList<>();
         for (int y = 0; y < foundBuilding.size(); y++) {
@@ -128,40 +178,40 @@ public class Application {
         LinkedList<Point> queue = new LinkedList<>();
         for (int y = 0; y < foundBuilding.size(); y++) {
             for (int x = 0; x < foundBuilding.get(y).size(); x++) {
-                if (foundBuilding.get(y).get(x)
-                        && colored.get(y).get(x) == 0) {
-                    colored.get(y).set(label, x);
+                if (colored.get(y).get(x) == 0
+                        && foundBuilding.get(y).get(x)) {
+                    colored.get(y).set(x, label);
                     queue.add(new Point(x, y));
                     while (!queue.isEmpty()) {
                         Point next = queue.pop();
                         int x1 = (int) next.getX();
                         int y1 = (int) next.getY();
                         if (y1 > 0) {
-                            if(x1 > 0) {
-                                if (colored.get(y1-1).get(x1-1) == 0) {
-                                    colored.get(y1-1).set(label, x1-1);
-                                    queue.add(new Point(x1-1, y1-1));
-                                }
-                            }
-                            if(x < colored.get(y1-1).size()-1) {
-                                if (colored.get(y1-1).get(x1+1) == 0) {
-                                    colored.get(y1-1).set(label, x1+1);
-                                    queue.add(new Point(x1+1, y1-1));
-                                }
+                            if (colored.get(y1 - 1).get(x1) == 0
+                                    && foundBuilding.get(y1 - 1).get(x1)) {
+                                colored.get(y1 - 1).set(x1, label);
+                                queue.add(new Point(x1, y1 - 1));
                             }
                         }
-                        if (y1 < colored.size()-1) {
-                            if(x1 > 0) {
-                                if (colored.get(y1+1).get(x1-1) == 0) {
-                                    colored.get(y1+1).set(label, x1-1);
-                                    queue.add(new Point(x1-1, y1+1));
-                                }
+                        if (y1 < colored.size() - 1) {
+                            if (colored.get(y1 + 1).get(x1) == 0
+                                    && foundBuilding.get(y1 + 1).get(x1)) {
+                                colored.get(y1 + 1).set(x1, label);
+                                queue.add(new Point(x1, y1 + 1));
                             }
-                            if(x < colored.get(y1+1).size()-1) {
-                                if (colored.get(y1+1).get(x1+1) == 0) {
-                                    colored.get(y1+1).set(label, x1+1);
-                                    queue.add(new Point(x1+1, y1+1));
-                                }
+                        }
+                        if (x1 > 0) {
+                            if (colored.get(y1).get(x1 - 1) == 0
+                                    && foundBuilding.get(y1).get(x1 - 1)) {
+                                colored.get(y1).set(x1 - 1, label);
+                                queue.add(new Point(x1 - 1, y1));
+                            }
+                        }
+                        if (x1 < colored.get(y1).size() - 1) {
+                            if (colored.get(y1).get(x1 + 1) == 0
+                                    && foundBuilding.get(y1).get(x1 + 1)) {
+                                colored.get(y1).set(x1 + 1, label);
+                                queue.add(new Point(x1 + 1, y1));
                             }
                         }
                     }
@@ -169,42 +219,14 @@ public class Application {
                 }
             }
         }
-        int[] xmins = new int[label];
-        int[] ymins = new int[label];
-        int[] xmaxs = new int[label];
-        int[] ymaxs = new int[label];
-        for (int y = 0; y < colored.size(); y++) {
-            for (int x = 0; x < colored.get(y).size(); x++) {
-                int lbl = colored.get(y).get(x)-1;
-                xmins[lbl] = Math.min(xmins[lbl], x);
-                ymins[lbl] = Math.min(ymins[lbl], y);
-                xmaxs[lbl] = Math.min(xmaxs[lbl], x);
-                ymaxs[lbl] = Math.min(ymaxs[lbl], y);
-            }
-        }
-
-        List<Coordinates> coords = new ArrayList<>();
-        for(int i = 0; i < label; i++) {
-            coords.add(new Coordinates(xmins[i], ymins[i], xmaxs[i], ymaxs[i]));
-        }
-        return coords;
-    }
-
-    public static boolean containsBuilding(VisualRecognition service, InputStream image) {
-        List<ClassResult> classes = classifyImage(service, image).getClassifiers().get(0).getClasses();
-        for (ClassResult result : classes) {
-            if (result.getClassName().equals("Building")) {
-                return true;
-            }
-        }
-        return false;
+        return colored;
     }
 
     public static ClassifiedImage classifyImage(VisualRecognition service, InputStream input) {
         ClassifyOptions classifyOptions = new ClassifyOptions.Builder()
                 .imagesFile(input)
                 .imagesFilename("test.jpg")
-                .threshold((float) 0.6)
+                .threshold((float) 0.3)
                 .classifierIds(Arrays.asList("default"))
                 .build();
         ClassifiedImages result = service.classify(classifyOptions).execute();
@@ -267,6 +289,6 @@ public class Application {
             Collections.sort(buildings, Comparator.comparing(Building::getLongitude).reversed().thenComparing(Building::getLatitute));
         }
 
-        return buildings.subList(0, numBuildings);
+        return buildings.subList(0, Math.min(numBuildings, buildings.size()));
     }
 }
